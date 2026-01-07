@@ -21,8 +21,9 @@ type Config struct {
 		SigExtPath     string `yaml:"sigext_path"`
 		SigExtFlags    string `yaml:"sigext_flags"`
 		Classification struct {
-			AnalogPatterns  []string `yaml:"analog_output_patterns"`
-			DigitalPatterns []string `yaml:"digital_output_patterns"`
+			// Cambiamos el nombre en el struct para reflejar que son REGEX
+			AnalogRegex  []string `yaml:"analog_output_regex"`
+			DigitalRegex []string `yaml:"digital_output_regex"`
 		} `yaml:"classification"`
 		Spares struct {
 			DO string `yaml:"do"`
@@ -47,7 +48,7 @@ var (
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-	fmt.Println("--- Generador DNP3 CLI v3.0 (Reglas Dinámicas) ---")
+	fmt.Println("--- Generador DNP3 CLI v3.2 (Regex Logic) ---")
 
 	projectPathPtr := flag.String("path", "", "Ruta raíz del proyecto")
 	nodeNamePtr := flag.String("node", "", "Nombre del Nodo")
@@ -56,10 +57,12 @@ func main() {
 	flag.Parse()
 
 	if *projectPathPtr == "" || *nodeNamePtr == "" {
-		log.Fatal("Uso: dnpgen.exe -path \"C:\\Ruta\" -node \"NombreNodo\"")
+		// Fallback para desarrollo (Opcional)
+		if *projectPathPtr == "" {
+			log.Fatal("Uso: dnpgen.exe -path \"C:\\Ruta\" -node \"NombreNodo\"")
+		}
 	}
 
-	// Resolver ruta absoluta para evitar errores al cambiar de contexto
 	absProjectPath, err := filepath.Abs(*projectPathPtr)
 	if err != nil {
 		log.Fatalf("Error ruta absoluta: %v", err)
@@ -67,42 +70,35 @@ func main() {
 
 	loadConfiguration()
 
-	// Construcción de rutas
 	resourceDir := filepath.Join(absProjectPath, RelativePathToResource)
 	sigFile := filepath.Join(resourceDir, *nodeNamePtr+".SIG")
 	mwtFile := filepath.Join(absProjectPath, *nodeNamePtr+".mwt")
 
-	// Fallback para encontrar el MWT
 	if _, err := os.Stat(mwtFile); os.IsNotExist(err) {
 		mwtFile = filepath.Join(resourceDir, *nodeNamePtr+".mwt")
 	}
 
-	// Validaciones de directorio
 	if _, err := os.Stat(resourceDir); os.IsNotExist(err) {
-		log.Fatalf("[FATAL] Directorio RTU_RESOURCE no encontrado: %s", resourceDir)
+		log.Fatalf("[FATAL] Recurso no encontrado: %s", resourceDir)
 	}
 
-	// Cambiar contexto para dependencias locales
 	if err := os.Chdir(resourceDir); err != nil {
-		log.Fatalf("No se pudo acceder a %s: %v", resourceDir, err)
+		log.Fatalf("Error accediendo a directorio: %v", err)
 	}
 
-	// Ejecución SIGEXT
 	if !*skipExtPtr {
 		log.Println("Ejecutando SIGEXT...")
 		err := runSigExt(GlobalConfig.App.SigExtPath, GlobalConfig.App.SigExtFlags, mwtFile, *nodeNamePtr, sigFile)
 		if err != nil {
-			log.Printf("[ERROR] SIGEXT: %v. Usando .SIG existente.", err)
-		} else {
-			log.Println("SIGEXT completado.")
+			log.Printf("[ERROR] SIGEXT: %v", err)
 		}
 	}
 
 	if _, err := os.Stat(sigFile); os.IsNotExist(err) {
-		log.Fatalf("[FATAL] No existe el archivo .SIG: %s", sigFile)
+		log.Fatalf("[FATAL] No existe .SIG: %s", sigFile)
 	}
 
-	log.Printf("Procesando lógica desde: %s", filepath.Base(sigFile))
+	log.Printf("Procesando: %s", filepath.Base(sigFile))
 	if err := processSigFile(sigFile); err != nil {
 		log.Fatalf("[FATAL] Error procesando: %v", err)
 	}
@@ -121,7 +117,6 @@ func main() {
 func loadConfiguration() {
 	exePath, _ := os.Executable()
 	configPathExe := filepath.Join(filepath.Dir(exePath), ConfigFile)
-
 	configPathCWD := ConfigFile
 
 	var f *os.File
@@ -132,11 +127,11 @@ func loadConfiguration() {
 	} else if _, errStat := os.Stat(configPathCWD); errStat == nil {
 		f, err = os.Open(configPathCWD)
 	} else {
-		log.Fatalf("No se encuentra %s ni junto al ejecutable ni en la carpeta actual.", ConfigFile)
+		log.Fatalf("No se encuentra %s", ConfigFile)
 	}
 
 	if err != nil {
-		log.Fatalf("Error abriendo el archivo de configuración: %v", err)
+		log.Fatalf("Error abriendo config: %v", err)
 	}
 	defer f.Close()
 
@@ -154,14 +149,17 @@ func runSigExt(exePath, flags, mwtPath, nodeName, sigPath string) error {
 		args = append(args, strings.Fields(flags)...)
 	}
 	args = append(args, mwtPath, nodeName, sigPath)
-
 	return exec.Command(exePath, args...).Run()
 }
 
-// isMatch verifica si el nombre contiene alguno de los patrones definidos en YAML
-func isMatch(name string, patterns []string) bool {
+// --- NUEVA LÓGICA DE REGEX ---
+// isMatchRegex verifica si el nombre cumple con alguna de las expresiones regulares del YAML
+func isMatchRegex(name string, patterns []string) bool {
 	for _, p := range patterns {
-		if strings.Contains(name, p) {
+		// regexp.MatchString compila y verifica.
+		// Si el patrón es inválido, devolverá error (aquí lo ignoramos y asume false)
+		matched, _ := regexp.MatchString(p, name)
+		if matched {
 			return true
 		}
 	}
@@ -180,7 +178,6 @@ func processSigFile(path string) error {
 	rules := GlobalConfig.App.Classification
 
 	scanner := bufio.NewScanner(file)
-	// Regex ajustado para soportar los nuevos formatos (BOOLA, REALAR)
 	re := regexp.MustCompile(`SIG=@GV\.([\w\d_]+)\s+TYPE=([A-Z]+)`)
 
 	for scanner.Scan() {
@@ -195,43 +192,47 @@ func processSigFile(path string) error {
 			varType := matches[2]
 			fullName := "@GV." + varName
 
-			// Excluir variable _SPAN del setpoint lógico si es necesario
-			isSpan := strings.Contains(varName, "_SPAN")
+			// Nota: La lógica de _SPAN ya está manejada por el regex _SP($|_) en el YAML
 
-			// --- LÓGICA DINÁMICA ---
+			// --- LÓGICA ESPEJO ---
 
-			if strings.Contains(varType, "AA") {
+			// 1. ANALÓGICAS
+			if strings.Contains(varType, "AA") || strings.Contains(varType, "REAL") {
 
-				// Usamos las reglas del YAML para decidir si es Output
-				isOutput := isMatch(varName, rules.AnalogPatterns) && !isSpan
+				// AHORA USAMOS REGEX
+				// Esto validará "LIT.*_H_H" -> Solo si tiene LIT y H_H es true.
+				// FT041_H_H -> Fallará el regex, por tanto isOutput = false (ENTRADA) -> Correcto.
+				isOutput := isMatchRegex(varName, rules.AnalogRegex)
 
 				if isOutput {
 					ListAO = append(ListAO, fullName)
-					ListAI = append(ListAI, fullName) // Espejo (I/O)
+					// Spare en AI con nombre para depurar
+					ListAI = append(ListAI, fmt.Sprintf("%s(%s)", spares.AI, varName))
 				} else {
 					ListAI = append(ListAI, fullName)
-					ListAO = append(ListAO, spares.AO) // Solo Input
+					// Spare en AO con nombre para depurar
+					ListAO = append(ListAO, fmt.Sprintf("%s(%s)", spares.AO, varName))
 				}
 
-			} else if strings.Contains(varType, "LA") {
+				// 2. DIGITALES
+			} else if strings.Contains(varType, "LA") || strings.Contains(varType, "BOOL") {
 
-				isOutput := isMatch(varName, rules.DigitalPatterns)
+				isOutput := isMatchRegex(varName, rules.DigitalRegex)
 
 				if isOutput {
 					ListDO = append(ListDO, fullName)
-					ListDI = append(ListDI, spares.DI) // Solo Output (Mando)
+					ListDI = append(ListDI, fmt.Sprintf("%s(%s)", spares.DI, varName))
 				} else {
 					ListDI = append(ListDI, fullName)
-					ListDO = append(ListDO, spares.DO) // Solo Input (Estado)
+					ListDO = append(ListDO, fmt.Sprintf("%s(%s)", spares.DO, varName))
 				}
 
-				// 3. TIPOS EXPLICITOS (Poco común en SIGEXT, pero por seguridad)
 			} else if varType == "AO" {
 				ListAO = append(ListAO, fullName)
-				ListAI = append(ListAI, spares.AI)
+				ListAI = append(ListAI, fmt.Sprintf("%s(%s)", spares.AI, varName))
 			} else if varType == "DO" {
 				ListDO = append(ListDO, fullName)
-				ListDI = append(ListDI, spares.DI)
+				ListDI = append(ListDI, fmt.Sprintf("%s(%s)", spares.DI, varName))
 			}
 		}
 	}
@@ -254,10 +255,10 @@ func generateListsFile() error {
 		fmt.Fprintln(w, "")
 	}
 
-	write("32764", "SALIDAS DIGITALES DNP", ListDO)
-	write("32763", "ENTRADAS DIGITALES DNP", ListDI)
-	write("32762", "SALIDAS ANALOGICAS DNP", ListAO)
 	write("32761", "ENTRADAS ANALOGICAS DNP", ListAI)
+	write("32762", "SALIDAS ANALOGICAS DNP", ListAO)
+	write("32763", "ENTRADAS DIGITALES DNP", ListDI)
+	write("32764", "SALIDAS DIGITALES DNP", ListDO)
 
 	return w.Flush()
 }

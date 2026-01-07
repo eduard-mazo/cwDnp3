@@ -3,11 +3,10 @@ app:
   sigext_flags: "-b -61131"
 
   classification:
-    analog_output_patterns:
-      - "_SP"
-      - "_H_H"
-      - "_L_L"
-      - "_DB"
+    analog_output_regex:
+      - "LIT.*_H_H"
+      - "LIT.*_L_L"
+      - "_SP($|_)"
 
     digital_output_patterns:
       - "_CMD"
