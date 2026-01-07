@@ -18,9 +18,13 @@ import (
 // --- CONFIGURACIÓN YAML ---
 type Config struct {
 	App struct {
-		SigExtPath  string `yaml:"sigext_path"`
-		SigExtFlags string `yaml:"sigext_flags"`
-		Spares      struct {
+		SigExtPath     string `yaml:"sigext_path"`
+		SigExtFlags    string `yaml:"sigext_flags"`
+		Classification struct {
+			AnalogPatterns  []string `yaml:"analog_output_patterns"`
+			DigitalPatterns []string `yaml:"digital_output_patterns"`
+		} `yaml:"classification"`
+		Spares struct {
 			DO string `yaml:"do"`
 			DI string `yaml:"di"`
 			AO string `yaml:"ao"`
@@ -29,7 +33,6 @@ type Config struct {
 	} `yaml:"app"`
 }
 
-// Constantes de estructura
 const (
 	RelativePathToResource = `C\CWave_Micro\R\RTU_RESOURCE`
 	ConfigFile             = "config.yaml"
@@ -37,18 +40,15 @@ const (
 	ListFile               = "__lists.ini"
 )
 
-// Variables Globales
 var (
 	GlobalConfig                   Config
 	ListAO, ListAI, ListDO, ListDI []string
 )
 
 func main() {
-	// 1. Configurar Logging
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-	fmt.Println("--- Generador DNP3 CLI v2.2 (Path Fix) ---")
+	fmt.Println("--- Generador DNP3 CLI v3.0 (Reglas Dinámicas) ---")
 
-	// 2. Parsear Argumentos
 	projectPathPtr := flag.String("path", "", "Ruta raíz del proyecto")
 	nodeNamePtr := flag.String("node", "", "Nombre del Nodo")
 	skipExtPtr := flag.Bool("skip-ext", false, "Saltar ejecución de SIGEXT")
@@ -56,120 +56,116 @@ func main() {
 	flag.Parse()
 
 	if *projectPathPtr == "" || *nodeNamePtr == "" {
-		log.Fatal("Uso incorrecto. Faltan argumentos -path o -node")
+		log.Fatal("Uso: dnpgen.exe -path \"C:\\Ruta\" -node \"NombreNodo\"")
 	}
 
-	// [FIX CRITICO] Convertir a Ruta Absoluta inmediatamente
-	// Esto evita que el os.Chdir rompa las referencias posteriores
+	// Resolver ruta absoluta para evitar errores al cambiar de contexto
 	absProjectPath, err := filepath.Abs(*projectPathPtr)
 	if err != nil {
-		log.Fatalf("Error resolviendo ruta absoluta del proyecto: %v", err)
+		log.Fatalf("Error ruta absoluta: %v", err)
 	}
 
-	// 3. Cargar Configuración
 	loadConfiguration()
 
-	// 4. Construir Rutas (Usando ruta absoluta)
+	// Construcción de rutas
 	resourceDir := filepath.Join(absProjectPath, RelativePathToResource)
 	sigFile := filepath.Join(resourceDir, *nodeNamePtr+".SIG")
-
-	// Buscar MWT (puede estar en raíz o en resource)
 	mwtFile := filepath.Join(absProjectPath, *nodeNamePtr+".mwt")
+
+	// Fallback para encontrar el MWT
 	if _, err := os.Stat(mwtFile); os.IsNotExist(err) {
 		mwtFile = filepath.Join(resourceDir, *nodeNamePtr+".mwt")
 	}
 
-	log.Printf("Directorio de Recursos: %s", resourceDir)
-
-	// Validar acceso
+	// Validaciones de directorio
 	if _, err := os.Stat(resourceDir); os.IsNotExist(err) {
-		log.Fatalf("[FATAL] Ruta no encontrada: %s", resourceDir)
+		log.Fatalf("[FATAL] Directorio RTU_RESOURCE no encontrado: %s", resourceDir)
 	}
 
-	// 5. CAMBIAR CONTEXTO (Entrar a la carpeta)
-	// Ahora es seguro porque sigFile ya es una ruta absoluta completa
+	// Cambiar contexto para dependencias locales
 	if err := os.Chdir(resourceDir); err != nil {
-		log.Fatalf("[FATAL] No se pudo acceder al directorio: %v", err)
+		log.Fatalf("No se pudo acceder a %s: %v", resourceDir, err)
 	}
 
-	// 6. Cargar Definiciones (__vardef.ini)
-	if _, err := os.Stat(VarDefFile); os.IsNotExist(err) {
-		log.Printf("[WARN] No se encontró %s. Se continúa sin validación.", VarDefFile)
-	}
-
-	// 7. Lógica SIGEXT vs Fallback
+	// Ejecución SIGEXT
 	if !*skipExtPtr {
-		log.Println("Intentando ejecutar SIGEXT.exe...")
+		log.Println("Ejecutando SIGEXT...")
 		err := runSigExt(GlobalConfig.App.SigExtPath, GlobalConfig.App.SigExtFlags, mwtFile, *nodeNamePtr, sigFile)
 		if err != nil {
-			// Es normal que falle en tu entorno actual, no es Fatal
-			log.Printf("[ERROR] SIGEXT falló: %v", err)
-			log.Println(">> FALLBACK: Usando archivo .SIG existente <<")
+			log.Printf("[ERROR] SIGEXT: %v. Usando .SIG existente.", err)
 		} else {
 			log.Println("SIGEXT completado.")
 		}
 	}
 
-	// 8. Verificar existencia del .SIG
 	if _, err := os.Stat(sigFile); os.IsNotExist(err) {
-		// Imprimimos la ruta exacta que falló para depurar
-		log.Fatalf("[FATAL] Archivo SIG no encontrado en:\n%s", sigFile)
+		log.Fatalf("[FATAL] No existe el archivo .SIG: %s", sigFile)
 	}
 
-	// 9. Procesar
-	log.Printf("Procesando: %s", filepath.Base(sigFile))
+	log.Printf("Procesando lógica desde: %s", filepath.Base(sigFile))
 	if err := processSigFile(sigFile); err != nil {
 		log.Fatalf("[FATAL] Error procesando: %v", err)
 	}
 
-	// 10. Generar
 	log.Println("Generando __lists.ini...")
 	if err := generateListsFile(); err != nil {
-		log.Fatalf("[FATAL] Error escribiendo: %v", err)
+		log.Fatalf("[FATAL] Error escribiendo INI: %v", err)
 	}
 
-	fmt.Println("\n--- RESUMEN FINAL ---")
+	fmt.Println("\n--- RESUMEN ---")
 	fmt.Printf("DI: %d | DO: %d | AI: %d | AO: %d\n", len(ListDI), len(ListDO), len(ListAI), len(ListAO))
-	log.Println("Éxito.")
 
 	time.Sleep(1 * time.Second)
 }
 
-// --- FUNCIONES ---
-
 func loadConfiguration() {
 	exePath, _ := os.Executable()
-	configPath := filepath.Join(filepath.Dir(exePath), ConfigFile)
+	configPathExe := filepath.Join(filepath.Dir(exePath), ConfigFile)
 
-	f, err := os.Open(configPath)
+	configPathCWD := ConfigFile
+
+	var f *os.File
+	var err error
+
+	if _, errStat := os.Stat(configPathExe); errStat == nil {
+		f, err = os.Open(configPathExe)
+	} else if _, errStat := os.Stat(configPathCWD); errStat == nil {
+		f, err = os.Open(configPathCWD)
+	} else {
+		log.Fatalf("No se encuentra %s ni junto al ejecutable ni en la carpeta actual.", ConfigFile)
+	}
+
 	if err != nil {
-		log.Fatalf("No se lee %s: %v", ConfigFile, err)
+		log.Fatalf("Error abriendo el archivo de configuración: %v", err)
 	}
 	defer f.Close()
 
 	if err := yaml.NewDecoder(f).Decode(&GlobalConfig); err != nil {
-		log.Fatalf("Error YAML: %v", err)
+		log.Fatalf("YAML malformado: %v", err)
 	}
 }
 
 func runSigExt(exePath, flags, mwtPath, nodeName, sigPath string) error {
 	if _, err := os.Stat(exePath); os.IsNotExist(err) {
-		return fmt.Errorf("ejecutable no encontrado: %s", exePath)
+		return fmt.Errorf("exe no encontrado")
 	}
-
-	// Preparar argumentos con flags opcionales
 	args := []string{}
 	if flags != "" {
 		args = append(args, strings.Fields(flags)...)
 	}
 	args = append(args, mwtPath, nodeName, sigPath)
 
-	cmd := exec.Command(exePath, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("err: %v | out: %s", err, string(output))
+	return exec.Command(exePath, args...).Run()
+}
+
+// isMatch verifica si el nombre contiene alguno de los patrones definidos en YAML
+func isMatch(name string, patterns []string) bool {
+	for _, p := range patterns {
+		if strings.Contains(name, p) {
+			return true
+		}
 	}
-	return nil
+	return false
 }
 
 func processSigFile(path string) error {
@@ -181,8 +177,10 @@ func processSigFile(path string) error {
 
 	ListAO, ListAI, ListDO, ListDI = []string{}, []string{}, []string{}, []string{}
 	spares := GlobalConfig.App.Spares
+	rules := GlobalConfig.App.Classification
 
 	scanner := bufio.NewScanner(file)
+	// Regex ajustado para soportar los nuevos formatos (BOOLA, REALAR)
 	re := regexp.MustCompile(`SIG=@GV\.([\w\d_]+)\s+TYPE=([A-Z]+)`)
 
 	for scanner.Scan() {
@@ -197,42 +195,37 @@ func processSigFile(path string) error {
 			varType := matches[2]
 			fullName := "@GV." + varName
 
-			// --- LÓGICA ESPEJO ---
+			// Excluir variable _SPAN del setpoint lógico si es necesario
+			isSpan := strings.Contains(varName, "_SPAN")
 
-			if varType == "AAR" || varType == "AA" {
-				// Analógicas
-				isLIT := strings.Contains(varName, "LIT")
-				isHiHi := strings.Contains(varName, "H_H")
-				isLoLo := strings.Contains(varName, "L_L")
-				isSP := strings.Contains(varName, "_SP")
-				isSPAN := strings.Contains(varName, "_SPAN")
+			// --- LÓGICA DINÁMICA ---
 
-				isOutput := (isLIT && isHiHi) || (isLIT && isLoLo) || (isSP && !isSPAN)
+			if strings.Contains(varType, "AA") {
+
+				// Usamos las reglas del YAML para decidir si es Output
+				isOutput := isMatch(varName, rules.AnalogPatterns) && !isSpan
 
 				if isOutput {
 					ListAO = append(ListAO, fullName)
-					ListAI = append(ListAI, fullName) // Espejo I/O
+					ListAI = append(ListAI, fullName) // Espejo (I/O)
 				} else {
 					ListAI = append(ListAI, fullName)
-					ListAO = append(ListAO, spares.AO) // Spare Salida
+					ListAO = append(ListAO, spares.AO) // Solo Input
 				}
 
-			} else if varType == "LA" {
-				// Digitales
-				isCmd := strings.Contains(varName, "_RESET") ||
-					strings.Contains(varName, "_CMD") ||
-					strings.Contains(varName, "_WD") ||
-					strings.Contains(varName, "_MANUAL") ||
-					strings.Contains(varName, "_OUT") ||
-					strings.Contains(varName, "_PULSO")
+			} else if strings.Contains(varType, "LA") {
 
-				if isCmd {
+				isOutput := isMatch(varName, rules.DigitalPatterns)
+
+				if isOutput {
 					ListDO = append(ListDO, fullName)
-					ListDI = append(ListDI, spares.DI) // Spare Entrada
+					ListDI = append(ListDI, spares.DI) // Solo Output (Mando)
 				} else {
 					ListDI = append(ListDI, fullName)
-					ListDO = append(ListDO, spares.DO) // Spare Salida
+					ListDO = append(ListDO, spares.DO) // Solo Input (Estado)
 				}
+
+				// 3. TIPOS EXPLICITOS (Poco común en SIGEXT, pero por seguridad)
 			} else if varType == "AO" {
 				ListAO = append(ListAO, fullName)
 				ListAI = append(ListAI, spares.AI)
@@ -246,13 +239,11 @@ func processSigFile(path string) error {
 }
 
 func generateListsFile() error {
-	// Se crea en el directorio actual (que cambiamos con os.Chdir)
 	file, err := os.Create(ListFile)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-
 	w := bufio.NewWriter(file)
 
 	write := func(code, title string, items []string) {

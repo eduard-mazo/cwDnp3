@@ -1,12 +1,26 @@
-# Configuración del Generador DNP3
 app:
-  # Ruta a la herramienta legacy SIGEXT.exe
-  # Usa comillas simples para evitar problemas con los backslashes de Windows
   sigext_path: 'C:\Program Files (x86)\Bristol\OpenBSI\SIGEXT.exe'
+  sigext_flags: "-b -61131"
 
-  # Nombres de las variables SPARE en __vardef.ini
+  classification:
+    analog_output_patterns:
+      - "_SP"
+      - "_H_H"
+      - "_L_L"
+      - "_DB"
+
+    digital_output_patterns:
+      - "_CMD"
+      - "_RESET"
+      - "_WD"
+      - "_MANUAL"
+      - "_OUT"
+      - "_PULSO"
+      - "_OPEN"
+      - "_CLOSE"
+
   spares:
-    do: '@GV.DNP_DO_SPARE'
-    di: '@GV.DNP_DI_SPARE'
-    ao: '@GV.DNP_AO_SPARE'
-    ai: '@GV.DNP_AI_SPARE'
+    do: "@GV.DNP_DO_SPARE"
+    di: "@GV.DNP_DI_SPARE"
+    ao: "@GV.DNP_AO_SPARE"
+    ai: "@GV.DNP_AI_SPARE"
